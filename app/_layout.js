@@ -1,6 +1,9 @@
+
 import { Stack } from "expo-router";
+import { useDailyNotifications } from "../utils/notifications";
 
 export default function RootLayout() {
+  useDailyNotifications();
   return (
     <>
       {/* Root stack controls screen transitions for the whole app */}
