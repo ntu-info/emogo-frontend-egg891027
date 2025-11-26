@@ -4,8 +4,7 @@ import { Link } from "expo-router";
 export default function SettingsScreen() {
   return (
     <View style={styles.container}>
-      {/* Second tab content */}
-      <Text style={styles.title}>Settings tab</Text>
+      <Text style={styles.title}>HELLO!  R13H41017</Text>
 
       {/* Link back to the home tab */}
       <Link href="/(tabs)" style={styles.link}>
