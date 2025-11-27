@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Modal, Pressable, Alert, TextInput, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Modal, Pressable, Alert, TextInput, ActivityIndicator } from 'react-native';
 import * as Location from 'expo-location';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import * as MediaLibrary from 'expo-media-library';
@@ -26,12 +26,13 @@ const faces = [
 
 export default function UnifiedTracker() {
   // --- State Management ---
-  const [name, setName] = useState(''); // New: Store user name
+  const [name, setName] = useState(''); 
   const [selectedMood, setSelectedMood] = useState(null);
-  const [location, setLocation] = useState(null); 
+  // Location state is no longer needed for display, but we fetch it during save
   const [vlogRecorded, setVlogRecorded] = useState(false); 
   
   const [isSaved, setIsSaved] = useState(false);
+  const [isSaving, setIsSaving] = useState(false); // New: Loading state for GPS fetch
   const [isRecording, setIsRecording] = useState(false);
   const [facing, setFacing] = useState('front');
 
@@ -43,7 +44,7 @@ export default function UnifiedTracker() {
   const [micPerm, requestMicPerm] = useMicrophonePermissions();
   const [mediaPerm, requestMediaPerm] = MediaLibrary.usePermissions();
 
-  // Initialize ONE table with 'name' column
+  // Initialize ONE table
   useEffect(() => {
     if (db) {
       try {
@@ -79,9 +80,9 @@ export default function UnifiedTracker() {
   const resetForm = () => {
     setName(''); 
     setSelectedMood(null);
-    setLocation(null);
     setVlogRecorded(false);
     setIsSaved(false);
+    setIsSaving(false);
   };
 
   const toggleCameraFacing = () => setFacing(c => (c === 'back' ? 'front' : 'back'));
@@ -91,16 +92,7 @@ export default function UnifiedTracker() {
     setSelectedMood(value);
   };
 
-  const getGPS = async () => {
-    if (isSaved) return;
-    let { status } = await Location.requestForegroundPermissionsAsync();
-    if (status !== 'granted') { Alert.alert("Permission Denied", "Location permission needed"); return; }
-    try {
-      const loc = await Location.getCurrentPositionAsync({});
-      setLocation(loc.coords);
-      // Alert is removed, feedback is now shown directly on the button text
-    } catch(e) { Alert.alert("Error", e.message); }
-  };
+  // Removed independent getGPS function
 
   const recordVlog = async () => {
     if (isSaved) return;
@@ -136,51 +128,68 @@ export default function UnifiedTracker() {
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   };
 
-  // 4. SAVE ENTRY (Validation Added)
+  // 4. SAVE ENTRY (Now includes GPS capture)
   const saveEntry = async () => {
-    // Validation Checks
+    // 1. Validation Checks
     if (!name.trim()) { Alert.alert("Missing Info", "Please enter your name."); return; }
     if (selectedMood === null) { Alert.alert("Missing Info", "Please select a mood."); return; }
-    const selectedMoodLabel = faces.find(f => f.value === selectedMood)?.label || '';
-    if (!location) { Alert.alert("Missing Info", "Please get GPS location."); return; }
-    if (!vlogRecorded) { Alert.alert("Missing Info", "Please record a 1s vlog."); return; }
+    // if (!vlogRecorded) { Alert.alert("Missing Info", "Please record a 1s vlog."); return; }
     
-    const timestamp = new Date().toISOString();
-    const lat = location.latitude;
-    const lng = location.longitude;
+    // 2. Start Saving Process (Show loading)
+    setIsSaving(true);
 
     try {
+      // 3. Capture GPS
+      let { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') { 
+          setIsSaving(false);
+          Alert.alert("Permission Denied", "Location permission is required to save."); 
+          return; 
+      }
+      
+      // Get location
+      const loc = await Location.getCurrentPositionAsync({});
+      const lat = loc.coords.latitude;
+      const lng = loc.coords.longitude;
+
+      const selectedMoodLabel = faces.find(f => f.value === selectedMood)?.label || '';
+      const timestamp = new Date().toISOString();
+
+      // 4. Write to DB
       if (db) {
         await db.runAsync(
           'INSERT INTO records (name, sentiment, latitude, longitude, timestamp) VALUES (?, ?, ?, ?, ?);',
           [name, selectedMoodLabel, lat, lng, timestamp]
         );
+        
         setIsSaved(true);
-        setModalMessage("Entry Saved Successfully!");
+        setModalMessage(`Data Saved!\nLocation: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
         setModalVisible(true);
       }
-    } catch (e) { Alert.alert("Save Failed", e.message); }
+    } catch (e) { 
+        Alert.alert("Save Failed", e.message); 
+    } finally {
+        setIsSaving(false); // Stop loading
+    }
   };
 
-  // Export Data (Updated Columns)
+  // Export Data
   const exportAllData = async () => {
     if (!db) return;
     try {
       const rows = await db.getAllAsync('SELECT * FROM records ORDER BY timestamp DESC;');
       
-      // Validation for Export
       if (rows.length === 0) { 
           Alert.alert("No Data", "No records found in database. Please save an entry first."); 
           return; 
       }
 
-      // CSV Header includes NAME
-        let csv = 'ID,NAME,SENTIMENT,LAT,LON,TIME\n';
+      let csv = 'ID,NAME,SENTIMENT,LAT,LON,TIME\n';
       
-        for (const row of rows) { 
-          const formattedTime = formatDateTime(row.timestamp);
-          csv += `${row.id},${row.name},${row.sentiment},${row.latitude},${row.longitude},${formattedTime}\n`; 
-        }
+      for (const row of rows) { 
+        const formattedTime = formatDateTime(row.timestamp);
+        csv += `${row.id},${row.name},${row.sentiment},${row.latitude},${row.longitude},${formattedTime}\n`; 
+      }
 
       const fileName = 'emogo_records.csv';
       const fileUri = FileSystem.documentDirectory + fileName;
@@ -195,19 +204,19 @@ export default function UnifiedTracker() {
       
       {/* Name Input Section */}
       <View style={styles.section}>
-         <Text style={styles.sectionTitle}>0. Name</Text>
+         <Text style={styles.sectionTitle}>Name</Text>
          <TextInput 
             style={styles.input} 
             placeholder="Enter your name" 
             value={name} 
             onChangeText={setName} 
-            editable={!isSaved} // Disable editing after save
+            editable={!isSaved}
          />
       </View>
 
       {/* Mood Selection Section */}
       <View style={styles.section}>
-         <Text style={styles.sectionTitle}>1. How do you feel?</Text>
+         <Text style={styles.sectionTitle}>How do you feel?</Text>
          <View style={styles.moodRow}>
             {faces.map(face => (
                 <TouchableOpacity 
@@ -220,22 +229,9 @@ export default function UnifiedTracker() {
          </View>
       </View>
 
-      {/* GPS Location Section */}
-      <View style={styles.section}>
-         <Text style={styles.sectionTitle}>2. Location</Text>
-         <TouchableOpacity style={[styles.gpsBtn, isSaved && styles.lockedBtn]} onPress={getGPS} disabled={isSaved}>
-            {/* Button Text Updates with Coordinates */}
-            <Text style={styles.btnText}>
-                {location 
-                    ? `Lat: ${location.latitude.toFixed(4)}, Lon: ${location.longitude.toFixed(4)}` 
-                    : 'Get GPS Position'}
-            </Text>
-         </TouchableOpacity>
-      </View>
-
-      {/* Vlog Recording Section */}
+      {/* Vlog Recording Section (Expanded) */}
       <View style={[styles.section, styles.vlogSection]}>
-         <Text style={styles.sectionTitle}>3. Vlog</Text>
+         <Text style={styles.sectionTitle}>Vlog</Text>
          <View style={styles.cameraContainer}>
             {(!cameraPerm?.granted) ? <View style={styles.cameraPlaceholder}><Text>Permission Needed</Text></View> : 
             <React.Fragment>
@@ -245,19 +241,24 @@ export default function UnifiedTracker() {
             }
          </View>
          <TouchableOpacity style={[styles.recordBtn, isRecording && {backgroundColor:'red'}, isSaved && styles.lockedBtn]} onPress={recordVlog} disabled={isRecording || isSaved}>
-            <Text style={styles.btnText}>{vlogRecorded ? 'Vlog Recorded (Ready)' : (isRecording ? 'Recording...' : 'Record 1s Vlog')}</Text>
+            <Text style={styles.actionBtnText}>{vlogRecorded ? 'Vlog Recorded (Ready)' : (isRecording ? 'Recording...' : 'Record 1s Vlog')}</Text>
          </TouchableOpacity>
       </View>
 
       {/* Save, Clear, Export Button Row */}
       <View style={styles.bottomIconRow}>
         <TouchableOpacity
-          style={[styles.actionBtn, styles.saveBtn, isSaved && styles.lockedBtn]}
+          style={[styles.actionBtn, styles.saveBtn, (isSaved || isSaving) && styles.lockedBtn]}
           onPress={saveEntry}
-          disabled={isSaved}
+          disabled={isSaved || isSaving}
           accessibilityLabel={isSaved ? 'Entry Saved' : 'Save Entry'}
         >
-          <Text style={styles.actionBtnText}>{isSaved ? 'Saved' : 'Save'}</Text>
+          {/* Show loading spinner when saving GPS */}
+          {isSaving ? (
+             <ActivityIndicator size="small" color="#fff" />
+          ) : (
+             <Text style={styles.actionBtnText}>{isSaved ? 'Saved' : 'Save'}</Text>
+          )}
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.actionBtn, styles.clearBtn]}
@@ -275,7 +276,7 @@ export default function UnifiedTracker() {
         </TouchableOpacity>
       </View>
 
-      <Modal visible={modalVisible} transparent={true}><View style={styles.modalBg}><View style={styles.modalBox}><Text style={styles.modalText}>Success</Text><Text>{modalMessage}</Text><Pressable style={styles.modalBtn} onPress={()=>setModalVisible(false)}><Text style={styles.btnText}>OK</Text></Pressable></View></View></Modal>
+      <Modal visible={modalVisible} transparent={true}><View style={styles.modalBg}><View style={styles.modalBox}><Text style={styles.modalText}>Success</Text><Text style={{textAlign:'center'}}>{modalMessage}</Text><Pressable style={styles.modalBtn} onPress={()=>setModalVisible(false)}><Text style={styles.btnText}>OK</Text></Pressable></View></View></Modal>
     </View>
   );
 }
@@ -286,36 +287,33 @@ const styles = StyleSheet.create({
   section: { backgroundColor: '#fff', borderRadius: 10, padding: 15, marginBottom: 10, shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 2, elevation: 2 },
   sectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#444', marginBottom: 10 },
   
-  // Input Style
   input: { borderWidth: 1, borderColor: '#ddd', borderRadius: 8, padding: 10, fontSize: 16, backgroundColor: '#fafafa' },
 
   moodRow: { flexDirection: 'row', justifyContent: 'space-between' },
   faceBtn: { width: 60, height: 45, justifyContent: 'center', alignItems: 'center', borderRadius: 8 },
   faceText: { fontSize: 11, fontWeight: '600' },
   
-  gpsBtn: { backgroundColor: '#3b6ea5', padding: 12, borderRadius: 8, alignItems: 'center' },
-  
-  vlogSection: { flex: 1, minHeight: 250 },
-  cameraContainer: { flex: 1, borderRadius: 10, overflow: 'hidden', backgroundColor: '#000', position: 'relative', minHeight: 150, marginBottom: 10 },
+  // Vlog section expanded (Min Height increased)
+  vlogSection: { flex: 1, minHeight: 300 }, 
+  cameraContainer: { flex: 1, borderRadius: 10, overflow: 'hidden', backgroundColor: '#000', position: 'relative', minHeight: 200, marginBottom: 10 },
   camera: { flex: 1 },
   cameraPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#eee' },
   flipButton: { position: 'absolute', top: 10, right: 10, padding: 8, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 10 },
   recordBtn: { backgroundColor: '#ffb347', padding: 12, borderRadius: 8, alignItems: 'center' },
 
   // Buttons
-  actionBtn: { minWidth: 110, paddingVertical: 8, paddingHorizontal: 22, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginHorizontal: 6, shadowColor: "#000", shadowOffset: {width: 0, height: 2}, shadowOpacity: 0.18, shadowRadius: 2, elevation: 2 },
-  saveBtn: { backgroundColor: '#4e944f' },
+  actionBtn: { minWidth: 120, paddingVertical: 12, paddingHorizontal: 18, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginHorizontal: 7, shadowColor: "#000", shadowOffset: {width: 0, height: 2}, shadowOpacity: 0.18, shadowRadius: 2, elevation: 2 },
+  saveBtn: { backgroundColor: '#4e944f' }, // Make save button slightly larger/flexible
   clearBtn: { backgroundColor: '#d9534f' },
   actionBtnText: { color: '#fff', fontSize: 15, fontWeight: 'bold', letterSpacing: 1 },
   lockedBtn: { backgroundColor: '#bbb' },
 
-  bottomIconRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 16, marginBottom: 10 },
-  exportBtn: { backgroundColor: '#333', marginHorizontal: 6 },
-  exportText: { color: '#fff', fontWeight: 'bold', fontSize: 15, textAlign: 'center', letterSpacing: 1 },
-  btnText: { color: '#fff', fontWeight: 'bold' },
+  bottomIconRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 10, marginBottom: 10 },
+  exportBtn: { backgroundColor: '#333' },
 
   modalBg: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
   modalBox: { backgroundColor: '#fff', width: '80%', padding: 25, borderRadius: 15, alignItems: 'center', elevation: 5 },
   modalText: { fontSize: 20, fontWeight: 'bold', marginBottom: 10, color: '#4e944f', textAlign: 'center' },
   modalBtn: { backgroundColor: '#4e944f', paddingHorizontal: 30, paddingVertical: 10, borderRadius: 20, alignSelf: 'center', marginTop: 15 },
+  btnText: { color: '#fff', fontWeight: 'bold' },
 });

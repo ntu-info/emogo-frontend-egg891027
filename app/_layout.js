@@ -5,8 +5,6 @@ import { StatusBar } from 'expo-status-bar';
 import { scheduleDailyReminders } from "../utils/notifications";
 
 export default function RootLayout() {
-  
-  // 3. 使用 useEffect 確保只在 App 啟動時執行一次排程
   useEffect(() => {
     scheduleDailyReminders();
   }, []);
