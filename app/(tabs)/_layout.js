@@ -19,11 +19,11 @@ export default function TabsLayout() {
           }}
         />
         <Tabs.Screen
-          name="settings"
+          name="history"
           options={{
-            title: "Settings",
+            title: "History",
             tabBarIcon: ({ color, size }) => (
-              <Ionicons name="settings-outline" color={color} size={size} />
+              <Ionicons name="time-outline" color={color} size={size} />
             ),
             headerStyle: { backgroundColor: '#000' },
             headerTintColor: '#fff',

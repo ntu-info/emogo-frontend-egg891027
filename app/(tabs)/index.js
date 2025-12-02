@@ -1,319 +1,432 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Modal, Pressable, Alert, TextInput, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Modal, TextInput, ActivityIndicator, PanResponder, ScrollView, Alert, StatusBar } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router'; 
 import * as Location from 'expo-location';
 import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import * as MediaLibrary from 'expo-media-library';
-import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system/legacy';
-import * as SQLite from 'expo-sqlite';
-import { MaterialIcons, FontAwesome } from '@expo/vector-icons';
+import { db, dbAll, dbRun, ensureSchema } from '../../utils/db'; // Ensure path is correct: ../../utils/db
+import * as Notifications from 'expo-notifications';
+import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 
-// Initialize database
-let db;
-try {
-  db = SQLite.openDatabaseSync('emogo.db');
-} catch (e) {
-  console.log("Error opening DB:", e);
+// --- 1. Notification Configuration ---
+// Use non-deprecated handler keys: shouldShowBanner / shouldShowList
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+// Database operations are provided by utils/db
+
+// Mood Constants
+const moodTicks = [0, 20, 40, 60, 80, 100];
+const moodLabels = ['Very Bad', 'Bad', 'Neutral', 'Good', 'Very Good'];
+
+// --- Helper: Scroll Picker Component for Time ---
+function AddReminderRow({ onAdd }) {
+    const [hour, setHour] = useState(9);
+    const [minute, setMinute] = useState(0);
+    const [showPicker, setShowPicker] = useState(false);
+    const [tempH, setTempH] = useState(hour);
+    const [tempM, setTempM] = useState(minute);
+    
+    const ITEM_HEIGHT = 40; 
+    
+    const openPicker = () => {
+      setTempH(hour);
+      setTempM(minute);
+      setShowPicker(true);
+    };
+  
+    const confirmPicker = () => {
+      setHour(tempH);
+      setMinute(tempM);
+      setShowPicker(false);
+      onAdd(tempH, tempM);
+    };
+  
+    const onHourScroll = (event) => {
+        const y = event.nativeEvent.contentOffset.y;
+        const index = Math.round(y / ITEM_HEIGHT);
+        setTempH(Math.max(0, Math.min(23, index)));
+    };
+
+    const onMinuteScroll = (event) => {
+        const y = event.nativeEvent.contentOffset.y;
+        const index = Math.round(y / ITEM_HEIGHT);
+        setTempM(Math.max(0, Math.min(59, index)));
+    };
+  
+    return (
+      <View style={{marginTop:8}}>
+        <View style={{flexDirection:'row', alignItems:'center', justifyContent: 'space-between'}}>
+          <Text style={{color: '#666'}}>Set Time:</Text>
+          <View style={{flexDirection: 'row', alignItems: 'center'}}>
+            <TouchableOpacity style={styles.timeDisplay} onPress={openPicker}>
+              <Text style={{fontWeight:'700', fontSize:18}}>{String(hour).padStart(2,'0')}:{String(minute).padStart(2,'0')}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.addTimeBtn} onPress={() => onAdd(hour, minute)}>
+                <MaterialIcons name="add" size={24} color="#fff" />
+            </TouchableOpacity>
+          </View>
+        </View>
+  
+        <Modal visible={showPicker} transparent animationType="fade">
+          <View style={styles.modalBg}>
+            <View style={styles.pickerContainer}>
+              <View style={styles.pickerHeader}>
+                <TouchableOpacity onPress={() => setShowPicker(false)}><Text style={{color:'#666'}}>Cancel</Text></TouchableOpacity>
+                <Text style={{fontWeight:'700'}}>Select Time</Text>
+                <TouchableOpacity onPress={confirmPicker}><Text style={{color:'#4e944f', fontWeight:'700'}}>Confirm</Text></TouchableOpacity>
+              </View>
+              <View style={styles.pickerBody}>
+                {/* Hour Wheel */}
+                <View style={styles.wheelContainer}>
+                    <Text style={styles.wheelLabel}>Hour</Text>
+                    <ScrollView snapToInterval={ITEM_HEIGHT} showsVerticalScrollIndicator={false} onMomentumScrollEnd={onHourScroll} style={{height: ITEM_HEIGHT * 3}} contentContainerStyle={{paddingVertical: ITEM_HEIGHT}}>
+                        {Array.from({length:24}).map((_, i) => (
+                            <View key={i} style={{height: ITEM_HEIGHT, justifyContent: 'center', alignItems: 'center'}}>
+                                <Text style={{fontSize: 20, fontWeight: i === tempH ? 'bold' : 'normal'}}>{String(i).padStart(2,'0')}</Text>
+                            </View>
+                        ))}
+                    </ScrollView>
+                </View>
+                <Text style={{fontSize: 24, fontWeight: 'bold', marginTop: 20}}>:</Text>
+                {/* Minute Wheel */}
+                <View style={styles.wheelContainer}>
+                    <Text style={styles.wheelLabel}>Minute</Text>
+                    <ScrollView snapToInterval={ITEM_HEIGHT} showsVerticalScrollIndicator={false} onMomentumScrollEnd={onMinuteScroll} style={{height: ITEM_HEIGHT * 3}} contentContainerStyle={{paddingVertical: ITEM_HEIGHT}}>
+                        {Array.from({length:60}).map((_, i) => (
+                            <View key={i} style={{height: ITEM_HEIGHT, justifyContent: 'center', alignItems: 'center'}}>
+                                <Text style={{fontSize: 20, fontWeight: i === tempM ? 'bold' : 'normal'}}>{String(i).padStart(2,'0')}</Text>
+                            </View>
+                        ))}
+                    </ScrollView>
+                </View>
+              </View>
+              <View style={styles.pickerSelectionOverlay} pointerEvents="none" />
+            </View>
+          </View>
+        </Modal>
+      </View>
+    );
 }
 
-const faces = [
-  { value: 1, label: 'Very Good', color: '#7ed957' },
-  { value: 2, label: 'Good', color: '#b6e36c' },
-  { value: 3, label: 'Neutral', color: '#ffe066' },
-  { value: 4, label: 'Bad', color: '#ffb347' },
-  { value: 5, label: 'Very Bad', color: '#ff5c5c' },
-];
-
+// --- Main Component ---
 export default function UnifiedTracker() {
-  // --- State Management ---
-  const [name, setName] = useState(''); 
-  const [selectedMood, setSelectedMood] = useState(null);
-  // Location state is no longer needed for display, but we fetch it during save
-  const [vlogRecorded, setVlogRecorded] = useState(false); 
-  
-  const [isSaved, setIsSaved] = useState(false);
-  const [isSaving, setIsSaving] = useState(false); // New: Loading state for GPS fetch
+  const router = useRouter(); 
+  // Steps: 1 = Info & Notifications, 2 = Vlog & Save
+  const [step, setStep] = useState(1);
+  // Form State
+  const [name, setName] = useState('');
+  const [mood, setMood] = useState(50);
+  const [activity, setActivity] = useState('');
+  // Vlog State
+  const [videoUri, setVideoUri] = useState(null);
+  const [vlogRecorded, setVlogRecorded] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [facing, setFacing] = useState('front');
-
+  const [isSaving, setIsSaving] = useState(false);
+  // Notification State
+  const [remindersList, setRemindersList] = useState([]);
+  const REMINDERS_FILE = FileSystem.documentDirectory + 'emogo_reminders.json';
+  // Refs & Layout
   const cameraRef = useRef(null);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [modalMessage, setModalMessage] = useState('');
-
+  const [trackLayout, setTrackLayout] = useState({ x: 0, width: 0 });
+  const pan = useRef(null);
+  const trackRef = useRef(null);
   const [cameraPerm, requestCameraPerm] = useCameraPermissions();
-  const [micPerm, requestMicPerm] = useMicrophonePermissions();
-  const [mediaPerm, requestMediaPerm] = MediaLibrary.usePermissions();
+  const [micPerm, requestMicrophonePerm] = useMicrophonePermissions();
 
-  // Initialize ONE table
+  // --- Initialization ---
   useEffect(() => {
-    if (db) {
-      try {
-        db.execSync(`
-          CREATE TABLE IF NOT EXISTS records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            name TEXT,
-            sentiment TEXT, 
-            latitude REAL, 
-            longitude REAL, 
-            timestamp TEXT
-          );
-        `);
-      } catch (e) {
-        console.error("Table creation failed:", e);
-      }
-    }
+    // Ensure DB schema exists before anything else
+    ensureSchema().catch(e => console.error("DB Schema Init Failed:", e));
+    // Load Reminders
+    loadRemindersFromFile();
   }, []);
 
-  // Clear all data
-  const clearAllData = async () => {
-    if (!db) return;
+  // --- Notification Logic ---
+  const loadRemindersFromFile = async () => {
     try {
-      await db.runAsync('DELETE FROM records;');
-      await db.runAsync("DELETE FROM sqlite_sequence WHERE name='records';");
-      Alert.alert('Data Cleared', 'All records removed.');
-      resetForm();
+      const info = await FileSystem.getInfoAsync(REMINDERS_FILE);
+      if (info.exists) {
+        const txt = await FileSystem.readAsStringAsync(REMINDERS_FILE);
+        setRemindersList(JSON.parse(txt || '[]'));
+      }
+    } catch (e) { console.warn('Load reminders failed', e); }
+  };
+
+  const saveRemindersToFile = async (list) => {
+    try {
+      await FileSystem.writeAsStringAsync(REMINDERS_FILE, JSON.stringify(list));
+      setRemindersList(list);
+    } catch (e) { console.warn('Save reminders failed', e); }
+  };
+
+  // --- FIX: Ensure Numbers for Trigger Time ---
+  const addReminder = async (h, m) => {
+    // 1. Force cast to integer (CRITICAL FIX)
+    const hour = parseInt(h, 10);
+    const minute = parseInt(m, 10);
+
+    if (isNaN(hour) || isNaN(minute)) {
+        Alert.alert('Error', 'Invalid time format');
+        return;
+    }
+
+    const { status } = await Notifications.requestPermissionsAsync();
+    if (status !== 'granted') { Alert.alert('Permission', 'Notifications permission required'); return; }
+
+    try {
+      const id = await Notifications.scheduleNotificationAsync({
+        content: { 
+            title: 'EmoGo Reminder', 
+            body: `Time to record your mood & vlog! (${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')})`,
+            sound: true,
+        },
+        trigger: { 
+            hour: hour, 
+            minute: minute, 
+            repeats: true 
+        }
+      });
+
+      const newItem = { id: Date.now(), hour: hour, minute: minute, notificationId: id };
+      const newList = [...remindersList, newItem];
+      await saveRemindersToFile(newList);
+      Alert.alert('Success', `Reminder set for ${String(hour).padStart(2,'0')}:${String(minute).padStart(2,'0')}`);
     } catch (e) {
-      Alert.alert('Clear Failed', e.message);
+      console.error('[Debug] Schedule failed:', e);
+      Alert.alert('Error', e.message);
     }
   };
 
-  const resetForm = () => {
-    setName(''); 
-    setSelectedMood(null);
-    setVlogRecorded(false);
-    setIsSaved(false);
-    setIsSaving(false);
+  const removeReminder = async (item) => {
+    try {
+      await Notifications.cancelScheduledNotificationAsync(item.notificationId);
+      const newList = remindersList.filter(r => r.id !== item.id);
+      await saveRemindersToFile(newList);
+    } catch (e) { console.warn('Remove failed', e); }
   };
 
+  // --- Mood Slider Logic ---
+  useEffect(() => {
+    pan.current = PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onPanResponderMove: (evt, gestureState) => {
+        if (!trackLayout.width) return;
+        const pageX = evt.nativeEvent.pageX != null ? evt.nativeEvent.pageX : evt.nativeEvent.locationX;
+        const pad = 12; 
+        const inner = Math.max(0, trackLayout.width - pad * 2);
+        const rel = Math.max(0, Math.min(inner, pageX - (trackLayout.x + pad)));
+        const ratio = inner > 0 ? rel / inner : 0;
+        setMood(Math.round(ratio * 100));
+      },
+      onPanResponderRelease: () => {}
+    });
+  }, [trackLayout.width, trackLayout.x]);
+
+  const moodLabelFor = (score) => {
+    const idx = Math.min(moodLabels.length - 1, Math.floor(score / 20));
+    return moodLabels[idx] || '';
+  };
+  const thumbLeftPx = trackLayout.width ? (12 + (Math.max(0, Math.min(100, mood)) / 100) * Math.max(0, trackLayout.width - 24)) : 0;
+
+  // --- Navigation & Actions ---
+  const goNext = () => {
+      if (!name.trim()) { Alert.alert('Missing Info', 'Please enter your name'); return; }
+      if (!activity.trim()) { Alert.alert('Missing Info', 'Please describe what you are doing'); return; }
+      setStep(2);
+  };
+  const goBack = () => { setStep(1); };
   const toggleCameraFacing = () => setFacing(c => (c === 'back' ? 'front' : 'back'));
-  
-  const handleMoodSelect = (value) => {
-    if (isSaved) return; 
-    setSelectedMood(value);
-  };
-
-  // Removed independent getGPS function
 
   const recordVlog = async () => {
-    if (isSaved) return;
-    if (!cameraPerm?.granted || !micPerm?.granted || !mediaPerm?.granted) {
-      if (!cameraPerm?.granted) await requestCameraPerm();
-      if (!micPerm?.granted) await requestMicPerm();
-      if (!mediaPerm?.granted) await requestMediaPerm();
-      return;
+    if (!cameraPerm?.granted || !micPerm?.granted) {
+      const c = await requestCameraPerm();
+      const m = await requestMicrophonePerm();
+      if (!c.granted || !m.granted) return;
     }
     if (cameraRef.current) {
       setIsRecording(true);
       try {
         const video = await cameraRef.current.recordAsync({ maxDuration: 1, quality: '480p' });
         if (video.uri) {
-          await MediaLibrary.saveToLibraryAsync(video.uri);
+          try { await MediaLibrary.saveToLibraryAsync(video.uri); } catch (e) {}
+          setVideoUri(video.uri);
           setVlogRecorded(true);
-          Alert.alert("Vlog Recorded", "Video saved to gallery.");
         }
-      } catch(e){} finally { setIsRecording(false); }
+      } catch(e) { console.log(e); } finally { setIsRecording(false); }
     }
   };
 
-  // Helper: Format Date
-  const formatDateTime = (isoString) => {
-    if (!isoString) return '';
-    const date = new Date(isoString);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const seconds = String(date.getSeconds()).padStart(2, '0');
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-  };
+  const saveAll = async () => {
+      if (!videoUri) { Alert.alert('Vlog Missing', 'Please record a vlog first.'); return; }
+      setIsSaving(true);
+      try {
+        let { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') { Alert.alert('Permission', 'Location needed'); setIsSaving(false); return; }
+        const loc = await Location.getCurrentPositionAsync({});
+        const moodLabel = moodLabelFor(mood);
+        const timestamp = new Date().toISOString();
 
-  // 4. SAVE ENTRY (Now includes GPS capture)
-  const saveEntry = async () => {
-    // 1. Validation Checks
-    if (!name.trim()) { Alert.alert("Missing Info", "Please enter your name."); return; }
-    if (selectedMood === null) { Alert.alert("Missing Info", "Please select a mood."); return; }
-    // if (!vlogRecorded) { Alert.alert("Missing Info", "Please record a 1s vlog."); return; }
-    
-    // 2. Start Saving Process (Show loading)
-    setIsSaving(true);
-
-    try {
-      // 3. Capture GPS
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') { 
-          setIsSaving(false);
-          Alert.alert("Permission Denied", "Location permission is required to save."); 
-          return; 
-      }
-      
-      // Get location
-      const loc = await Location.getCurrentPositionAsync({});
-      const lat = loc.coords.latitude;
-      const lng = loc.coords.longitude;
-
-      const selectedMoodLabel = faces.find(f => f.value === selectedMood)?.label || '';
-      const timestamp = new Date().toISOString();
-
-      // 4. Write to DB
-      if (db) {
-        await db.runAsync(
-          'INSERT INTO records (name, sentiment, latitude, longitude, timestamp) VALUES (?, ?, ?, ?, ?);',
-          [name, selectedMoodLabel, lat, lng, timestamp]
+        // Save to DB 
+        await dbRun(
+            'INSERT INTO records (name, mood_label, mood_score, activity, video_uri, latitude, longitude, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
+            [name.trim(), moodLabel, mood, activity.trim(), videoUri, loc.coords.latitude, loc.coords.longitude, timestamp]
         );
-        
-        setIsSaved(true);
-        setModalMessage(`Data Saved!\nLocation: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
-        setModalVisible(true);
-      }
-    } catch (e) { 
-        Alert.alert("Save Failed", e.message); 
-    } finally {
-        setIsSaving(false); // Stop loading
-    }
-  };
 
-  // Export Data
-  const exportAllData = async () => {
-    if (!db) return;
-    try {
-      const rows = await db.getAllAsync('SELECT * FROM records ORDER BY timestamp DESC;');
-      
-      if (rows.length === 0) { 
-          Alert.alert("No Data", "No records found in database. Please save an entry first."); 
-          return; 
-      }
-
-      let csv = 'ID,NAME,SENTIMENT,LAT,LON,TIME\n';
-      
-      for (const row of rows) { 
-        const formattedTime = formatDateTime(row.timestamp);
-        csv += `${row.id},${row.name},${row.sentiment},${row.latitude},${row.longitude},${formattedTime}\n`; 
-      }
-
-      const fileName = 'emogo_records.csv';
-      const fileUri = FileSystem.documentDirectory + fileName;
-      await FileSystem.writeAsStringAsync(fileUri, csv, { encoding: 'utf8' });
-
-      if (await Sharing.isAvailableAsync()) { await Sharing.shareAsync(fileUri); }
-    } catch (e) { Alert.alert("Export Failed", e.message); }
+        Alert.alert('Success', 'Entry Saved!', [
+            { text: 'OK', onPress: () => {
+                setName('');
+                setActivity('');
+                setMood(50);
+                setVideoUri(null);
+                setVlogRecorded(false);
+                setStep(1); 
+                router.push('/(tabs)/history'); 
+            }}
+        ]);
+      } catch (e) {
+          Alert.alert('Error', 'Save failed: ' + e.message);
+          console.error(e);
+      } finally { setIsSaving(false); }
   };
 
   return (
-    <View style={styles.screen}>
-      
-      {/* Name Input Section */}
-      <View style={styles.section}>
-         <Text style={styles.sectionTitle}>Name</Text>
-         <TextInput 
-            style={styles.input} 
-            placeholder="Enter your name" 
-            value={name} 
-            onChangeText={setName} 
-            editable={!isSaved}
-         />
-      </View>
+    <View style={styles.container}>
+      {/* Global Status Bar Setting (Black background) */}
+      <StatusBar barStyle="light-content" backgroundColor="#000" />
 
-      {/* Mood Selection Section */}
-      <View style={styles.section}>
-         <Text style={styles.sectionTitle}>How do you feel?</Text>
-         <View style={styles.moodRow}>
-            {faces.map(face => (
-                <TouchableOpacity 
-                    key={face.value} 
-                    style={[styles.faceBtn, {backgroundColor: selectedMood === face.value ? face.color : '#f4f4f4'}]} 
-                    onPress={() => handleMoodSelect(face.value)} disabled={isSaved}>
-                    <Text style={styles.faceText}>{face.label}</Text>
+      {/* --- HEADER --- */}
+      <SafeAreaView style={{backgroundColor: '#fff'}}>
+        <View style={styles.header}>
+            <Text style={styles.headerTitle}>EmoGo Tracker</Text>
+            {/* Link to History page */}
+            <TouchableOpacity style={styles.historyLink} onPress={() => router.push('/(tabs)/history')}>
+                <Text style={styles.historyText}>History</Text>
+                <MaterialIcons name="history" size={24} color="#4e944f" />
+            </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        
+        {/* === STEP 1: INFO & NOTIFICATIONS === */}
+        {step === 1 && (
+            <View>
+                {/* Name */}
+                <View style={styles.card}>
+                    <Text style={styles.label}>1. Who are you?</Text>
+                    <TextInput style={styles.input} placeholder="Enter Name" value={name} onChangeText={setName} />
+                </View>
+                {/* Mood */}
+                <View style={styles.card}>
+                    <Text style={styles.label}>2. How do you feel? ({mood})</Text>
+                    <Text style={{textAlign:'center', color:'#4e944f', fontWeight:'bold', marginBottom:10}}>{moodLabelFor(mood)}</Text>
+                    <View style={{height: 40, justifyContent:'center'}} ref={trackRef} onLayout={() => { if (trackRef.current) { trackRef.current.measureInWindow((x, y, w, h) => setTrackLayout({x, width: w})); } }} {...(pan.current ? pan.current.panHandlers : {})}>
+                        <View style={styles.sliderTrack}><View style={[styles.sliderFill, {width: `${mood}%`}]} /></View>
+                        <View style={[styles.thumb, {left: thumbLeftPx}]} pointerEvents="none" />
+                    </View>
+                </View>
+                {/* Activity */}
+                <View style={styles.card}>
+                    <Text style={styles.label}>3. What are you doing?</Text>
+                    <TextInput style={styles.input} placeholder="e.g., Coding, Eating..." value={activity} onChangeText={setActivity} />
+                </View>
+
+                {/* Notifications (Rolling Wheel) */}
+                <View style={styles.card}>
+                    <Text style={styles.label}>Daily Reminders</Text>
+                    {remindersList.length === 0 && <Text style={{color:'#999', fontStyle:'italic', marginBottom:10}}>No reminders set.</Text>}
+                    {remindersList.map((r) => (
+                        <View key={r.id} style={styles.reminderItem}>
+                            <Text style={styles.reminderText}>{String(r.hour).padStart(2,'0')}:{String(r.minute).padStart(2,'0')}</Text>
+                            <TouchableOpacity onPress={() => removeReminder(r)}><MaterialIcons name="delete" size={20} color="#d9534f" /></TouchableOpacity>
+                        </View>
+                    ))}
+                    <AddReminderRow onAdd={addReminder} />
+                </View>
+
+                {/* Next Button */}
+                <TouchableOpacity style={styles.nextBtn} onPress={goNext}>
+                    <Text style={styles.btnText}>Next: Record Vlog</Text>
+                    <MaterialIcons name="arrow-forward" size={20} color="#fff" />
                 </TouchableOpacity>
-            ))}
-         </View>
-      </View>
+            </View>
+        )}
 
-      {/* Vlog Recording Section (Expanded) */}
-      <View style={[styles.section, styles.vlogSection]}>
-         <Text style={styles.sectionTitle}>Vlog</Text>
-         <View style={styles.cameraContainer}>
-            {(!cameraPerm?.granted) ? <View style={styles.cameraPlaceholder}><Text>Permission Needed</Text></View> : 
-            <React.Fragment>
-                <CameraView ref={cameraRef} style={styles.camera} facing={facing} mode="video" />
-                <TouchableOpacity style={styles.flipButton} onPress={toggleCameraFacing}><MaterialIcons name="flip-camera-ios" size={24} color="white"/></TouchableOpacity>
-            </React.Fragment>
-            }
-         </View>
-         <TouchableOpacity style={[styles.recordBtn, isRecording && {backgroundColor:'red'}, isSaved && styles.lockedBtn]} onPress={recordVlog} disabled={isRecording || isSaved}>
-            <Text style={styles.actionBtnText}>{vlogRecorded ? 'Vlog Recorded (Ready)' : (isRecording ? 'Recording...' : 'Record 1s Vlog')}</Text>
-         </TouchableOpacity>
-      </View>
+        {/* === STEP 2: VLOG & SAVE === */}
+        {step === 2 && (
+            <View>
+                <View style={[styles.card, {height: 400}]}>
+                    <Text style={styles.label}>4. Record 1s Vlog</Text>
+                    <View style={styles.cameraContainer}>
+                        {!cameraPerm?.granted ? ( <View style={styles.placeholder}><Text>No Camera Permission</Text></View> ) : ( <CameraView ref={cameraRef} style={{flex:1}} facing={facing} mode="video" /> )}
+                        <TouchableOpacity style={styles.flipBtn} onPress={toggleCameraFacing}><MaterialIcons name="flip-camera-ios" size={24} color="#fff" /></TouchableOpacity>
+                    </View>
+                    
+                    <TouchableOpacity 
+                        style={[styles.recordBtn, isRecording && {backgroundColor:'red'}, vlogRecorded && {backgroundColor:'#4e944f'}]} 
+                        onPress={recordVlog}
+                        disabled={isRecording}
+                    >
+                        <Text style={styles.btnText}>{isRecording ? 'Recording...' : vlogRecorded ? 'Re-record Vlog' : 'Start Recording'}</Text>
+                    </TouchableOpacity>
+                </View>
 
-      {/* Save, Clear, Export Button Row */}
-      <View style={styles.bottomIconRow}>
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.saveBtn, (isSaved || isSaving) && styles.lockedBtn]}
-          onPress={saveEntry}
-          disabled={isSaved || isSaving}
-          accessibilityLabel={isSaved ? 'Entry Saved' : 'Save Entry'}
-        >
-          {/* Show loading spinner when saving GPS */}
-          {isSaving ? (
-             <ActivityIndicator size="small" color="#fff" />
-          ) : (
-             <Text style={styles.actionBtnText}>{isSaved ? 'Saved' : 'Save'}</Text>
-          )}
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.clearBtn]}
-          onPress={clearAllData}
-          accessibilityLabel="Clear All"
-        >
-            <Text style={styles.actionBtnText}>Clear</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionBtn, styles.exportBtn]}
-          onPress={exportAllData}
-          accessibilityLabel="Export CSV"
-        >
-            <Text style={styles.actionBtnText}>Export</Text>
-        </TouchableOpacity>
-      </View>
+                <View style={styles.step2Actions}>
+                    <TouchableOpacity style={styles.backBtn} onPress={goBack} disabled={isSaving}><Text style={{color:'#666'}}>Back</Text></TouchableOpacity>
+                    <TouchableOpacity style={[styles.saveBtn, (!vlogRecorded || isSaving) && {backgroundColor:'#ccc'}]} onPress={saveAll} disabled={!vlogRecorded || isSaving}>
+                        {isSaving ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnText}>Save Entry</Text>}
+                    </TouchableOpacity>
+                </View>
+            </View>
+        )}
 
-      <Modal visible={modalVisible} transparent={true}><View style={styles.modalBg}><View style={styles.modalBox}><Text style={styles.modalText}>Success</Text><Text style={{textAlign:'center'}}>{modalMessage}</Text><Pressable style={styles.modalBtn} onPress={()=>setModalVisible(false)}><Text style={styles.btnText}>OK</Text></Pressable></View></View></Modal>
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#f5f5f5', padding: 10, paddingTop: 20 },
-  
-  section: { backgroundColor: '#fff', borderRadius: 10, padding: 15, marginBottom: 10, shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 2, elevation: 2 },
-  sectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#444', marginBottom: 10 },
-  
-  input: { borderWidth: 1, borderColor: '#ddd', borderRadius: 8, padding: 10, fontSize: 16, backgroundColor: '#fafafa' },
-
-  moodRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  faceBtn: { width: 60, height: 45, justifyContent: 'center', alignItems: 'center', borderRadius: 8 },
-  faceText: { fontSize: 11, fontWeight: '600' },
-  
-  // Vlog section expanded (Min Height increased)
-  vlogSection: { flex: 1, minHeight: 300 }, 
-  cameraContainer: { flex: 1, borderRadius: 10, overflow: 'hidden', backgroundColor: '#000', position: 'relative', minHeight: 200, marginBottom: 10 },
-  camera: { flex: 1 },
-  cameraPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#eee' },
-  flipButton: { position: 'absolute', top: 10, right: 10, padding: 8, borderRadius: 20, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 10 },
-  recordBtn: { backgroundColor: '#ffb347', padding: 12, borderRadius: 8, alignItems: 'center' },
-
-  // Buttons
-  actionBtn: { minWidth: 120, paddingVertical: 12, paddingHorizontal: 18, borderRadius: 14, alignItems: 'center', justifyContent: 'center', marginHorizontal: 7, shadowColor: "#000", shadowOffset: {width: 0, height: 2}, shadowOpacity: 0.18, shadowRadius: 2, elevation: 2 },
-  saveBtn: { backgroundColor: '#4e944f' }, // Make save button slightly larger/flexible
-  clearBtn: { backgroundColor: '#d9534f' },
-  actionBtnText: { color: '#fff', fontSize: 15, fontWeight: 'bold', letterSpacing: 1 },
-  lockedBtn: { backgroundColor: '#bbb' },
-
-  bottomIconRow: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 10, marginBottom: 10 },
-  exportBtn: { backgroundColor: '#333' },
-
-  modalBg: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)' },
-  modalBox: { backgroundColor: '#fff', width: '80%', padding: 25, borderRadius: 15, alignItems: 'center', elevation: 5 },
-  modalText: { fontSize: 20, fontWeight: 'bold', marginBottom: 10, color: '#4e944f', textAlign: 'center' },
-  modalBtn: { backgroundColor: '#4e944f', paddingHorizontal: 30, paddingVertical: 10, borderRadius: 20, alignSelf: 'center', marginTop: 15 },
-  btnText: { color: '#fff', fontWeight: 'bold' },
+  container: { flex: 1, backgroundColor: '#f2f2f2' },
+  header: { paddingTop: 10, paddingBottom: 10, paddingHorizontal: 20, backgroundColor: '#fff', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#ddd' },
+  headerTitle: { fontSize: 20, fontWeight: 'bold', color: '#333' },
+  historyLink: { flexDirection: 'row', alignItems: 'center' },
+  historyText: { marginRight: 5, color: '#4e944f', fontWeight: '600' },
+  scrollContent: { padding: 12 },
+  card: { backgroundColor: '#fff', borderRadius: 12, padding: 14, marginBottom: 12, shadowColor:'#000', shadowOpacity:0.05, shadowRadius:5, elevation:2 },
+  label: { fontSize: 16, fontWeight: 'bold', marginBottom: 10, color: '#333' },
+  input: { borderWidth: 1, borderColor: '#eee', backgroundColor:'#fafafa', borderRadius: 8, padding: 12, fontSize: 16 },
+  sliderTrack: { height: 10, backgroundColor: '#eee', borderRadius: 5, overflow: 'hidden' },
+  sliderFill: { height: 10, backgroundColor: '#4e944f' },
+  thumb: { position: 'absolute', width: 20, height: 20, borderRadius: 10, backgroundColor: '#fff', borderWidth: 2, borderColor: '#4e944f', top: -5, marginLeft: -10 },
+  nextBtn: { backgroundColor: '#333', flexDirection: 'row', justifyContent:'center', alignItems:'center', padding: 15, borderRadius: 10 },
+  btnText: { color: '#fff', fontWeight: 'bold', fontSize: 16, marginRight: 5 },
+  cameraContainer: { flex: 1, backgroundColor: '#000', borderRadius: 10, overflow: 'hidden', marginBottom: 15 },
+  placeholder: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#eee' },
+  flipBtn: { position: 'absolute', top: 10, right: 10, padding: 8, backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 20 },
+  recordBtn: { backgroundColor: '#ff9800', padding: 15, borderRadius: 10, alignItems: 'center' },
+  step2Actions: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingBottom: 30 },
+  backBtn: { padding: 15 },
+  saveBtn: { backgroundColor: '#4e944f', paddingVertical: 15, paddingHorizontal: 30, borderRadius: 10, minWidth: 150, alignItems:'center' },
+  reminderItem: { flexDirection:'row', justifyContent:'space-between', paddingVertical:8, borderBottomWidth:1, borderBottomColor:'#f0f0f0' },
+  reminderText: { fontSize: 16, color: '#555' },
+  timeDisplay: { padding: 8, backgroundColor: '#f9f9f9', borderRadius: 6, borderWidth: 1, borderColor: '#eee' },
+  addTimeBtn: { backgroundColor: '#4e944f', padding: 8, borderRadius: 6, marginLeft: 10 },
+  modalBg: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
+  pickerContainer: { backgroundColor: '#fff', borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingBottom: 30 },
+  pickerHeader: { flexDirection: 'row', justifyContent: 'space-between', padding: 15, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  pickerBody: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', height: 150 },
+  wheelContainer: { width: 80, height: 120, overflow: 'hidden' },
+  wheelLabel: { textAlign: 'center', fontSize: 12, color: '#888', marginBottom: 5 },
+  pickerSelectionOverlay: { position: 'absolute', top: 60 + 20, left: 0, right: 0, height: 40, backgroundColor: 'rgba(0,0,0,0.05)', zIndex: -1 },
 });
