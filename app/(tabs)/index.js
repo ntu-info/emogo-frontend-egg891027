@@ -10,6 +10,10 @@ import { db, dbAll, dbRun, ensureSchema } from '../../utils/db'; // Ensure path 
 import * as Notifications from 'expo-notifications';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons';
 
+
+const BACKEND_URL = 'https://emogo-backend-egg891027.onrender.com';
+const API_ENDPOINT = `${BACKEND_URL}/api/v1/data/all`;
+
 // --- 1. Notification Configuration ---
 // Use non-deprecated handler keys: shouldShowBanner / shouldShowList
 Notifications.setNotificationHandler({
@@ -29,7 +33,7 @@ const moodLabels = ['Very Bad', 'Bad', 'Neutral', 'Good', 'Very Good'];
 
 // --- Helper: Scroll Picker Component for Time ---
 function AddReminderRow({ onAdd }) {
-    const [hour, setHour] = useState(9);
+    const [hour, setHour] = useState(0);
     const [minute, setMinute] = useState(0);
     const [showPicker, setShowPicker] = useState(false);
     const [tempH, setTempH] = useState(hour);
@@ -269,20 +273,71 @@ export default function UnifiedTracker() {
 
   const saveAll = async () => {
       if (!videoUri) { Alert.alert('Vlog Missing', 'Please record a vlog first.'); return; }
+      
       setIsSaving(true);
       try {
+        // 1. 獲取 GPS
         let { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted') { Alert.alert('Permission', 'Location needed'); setIsSaving(false); return; }
         const loc = await Location.getCurrentPositionAsync({});
+        
+        // 2. 準備資料
         const moodLabel = moodLabelFor(mood);
         const timestamp = new Date().toISOString();
 
-        // Save to DB 
-        await dbRun(
+        // 3. [Local] 存入本地 SQLite (保持不變，作為離線備份)
+        try {
+          await ensureSchema();
+          await dbRun(
             'INSERT INTO records (name, mood_label, mood_score, activity, video_uri, latitude, longitude, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?);',
             [name.trim(), moodLabel, mood, activity.trim(), videoUri, loc.coords.latitude, loc.coords.longitude, timestamp]
-        );
+          );
+        } catch (localErr) {
+            console.warn("Local DB save failed, trying cloud...", localErr);
+        }
 
+        // 4. [Cloud] ? 發送 POST 請求到 Render 後端 ?
+        try {
+            console.log("Uploading to:", API_ENDPOINT);
+            
+            // 準備符合後端 EmoGoData 模型的 JSON
+            const payload = {
+                NAME: name.trim(),
+                TIME: timestamp,
+                SENTIMENT: moodLabel,
+                MOOD_SCORE: mood,     // 後端新增的欄位
+                LAT: loc.coords.latitude,
+                LON: loc.coords.longitude,
+                // 注意：這裡傳送的是手機本地路徑 (file://)，
+                // 雖然能存入資料庫，但在儀表板上下載時其他人會無法讀取。
+                // 這符合 "Optional" 的基本串接要求。
+                VIDEO_LINK: videoUri, 
+                ACTIVITY: activity.trim()
+            };
+
+            const response = await fetch(API_ENDPOINT, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`Server Error: ${response.status} - ${errorText}`);
+            }
+            
+            const result = await response.json();
+            console.log("Backend success, Entry ID:", result.entry_id);
+            
+        } catch (serverError) {
+            console.error("Backend sync failed:", serverError);
+            // 這裡我們只顯示警告，不阻擋流程，因為本地已經存成功了
+            Alert.alert("Sync Warning", "Saved locally, but failed to send to server: " + serverError.message);
+        }
+
+        // 5. 完成與重置 UI
         Alert.alert('Success', 'Entry Saved!', [
             { text: 'OK', onPress: () => {
                 setName('');
@@ -294,10 +349,13 @@ export default function UnifiedTracker() {
                 router.push('/(tabs)/history'); 
             }}
         ]);
+
       } catch (e) {
           Alert.alert('Error', 'Save failed: ' + e.message);
           console.error(e);
-      } finally { setIsSaving(false); }
+      } finally {
+          setIsSaving(false);
+      }
   };
 
   return (

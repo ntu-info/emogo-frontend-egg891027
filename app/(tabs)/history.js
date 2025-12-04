@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, StatusBar } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router'; 
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
@@ -9,6 +8,12 @@ import { useFocusEffect } from '@react-navigation/native';
 import { MaterialIcons, Ionicons } from '@expo/vector-icons'; 
 
 // Database helpers are provided by utils/db
+
+// ? Define Backend URL (Must match index.js)
+const BACKEND_URL = 'https://emogo-backend-egg891027.onrender.com';
+// API Endpoints for deletion
+const API_DELETE_SINGLE = `${BACKEND_URL}/api/v1/data/entry`;
+const API_CLEAR_ALL = `${BACKEND_URL}/api/v1/data/clear-all`;
 
 export default function HistoryPage() {
   const router = useRouter(); 
@@ -37,15 +42,35 @@ export default function HistoryPage() {
     }
   };
 
-  const deleteRecord = async (id) => {
-    Alert.alert('Delete Record', 'Are you sure you want to delete this entry?', [
+  // ? [Modified] Delete Single Record - Sync with Backend
+  const deleteRecord = async (id, name, timestamp) => {
+    Alert.alert('Delete Record', 'Delete this entry from Phone AND Server?', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: async () => {
         try {
+          // 1. Delete from Local DB (Original Logic)
           await ensureSchema();
           await dbRun('DELETE FROM records WHERE id = ?;', [id]);
           // resequence ids so they are contiguous
           try { await resequenceRecords(); } catch (e) { console.warn('Resequence failed', e); }
+          
+          // 2. [New] Delete from Backend Server (Sync)
+          try {
+              // Construct URL with query parameters
+              const url = `${API_DELETE_SINGLE}?user_name=${encodeURIComponent(name)}&timestamp=${encodeURIComponent(timestamp)}`;
+              console.log("Deleting from backend:", url);
+              
+              const response = await fetch(url, { method: 'DELETE' });
+              
+              if (response.ok) {
+                  console.log('Backend data deleted successfully');
+              } else {
+                  console.warn('Backend delete failed status:', response.status);
+              }
+          } catch (serverErr) {
+              console.warn('Failed to contact server for delete:', serverErr);
+          }
+
           await loadRecords(); 
         } catch (e) { Alert.alert('Delete Failed', e.message); }
       } }
@@ -100,14 +125,26 @@ export default function HistoryPage() {
     } catch (e) { Alert.alert('Export Failed', e.message); }
   };
 
+  // ? [Modified] Clear All - Sync delete backend data
   const clearAll = async () => {
-    Alert.alert('Clear History', 'This will permanently delete ALL records. Are you sure?', [
+    Alert.alert('Clear History', 'This will permanently delete ALL records (Phone & Cloud). Are you sure?', [
       { text: 'Cancel', style: 'cancel' },
       { text: 'Clear All', style: 'destructive', onPress: async () => {
         try {
+          // 1. Delete Local DB (Original Logic)
           await ensureSchema();
           await dbRun('DELETE FROM records;');
           try { await dbRun("DELETE FROM sqlite_sequence WHERE name='records';"); } catch(e){}
+          
+          // 2. [New] Call Backend API to clear all (Sync)
+          try {
+              await fetch(API_CLEAR_ALL, { method: 'DELETE' });
+              console.log('Backend ALL data cleared');
+          } catch (serverErr) {
+              console.warn('Failed to clear backend data:', serverErr);
+              Alert.alert('Sync Warning', 'Local data cleared, but server clear failed.');
+          }
+
           await loadRecords();
         } catch (e) { Alert.alert('Clear Failed', e.message); }
       } }
@@ -124,7 +161,8 @@ export default function HistoryPage() {
              <Text style={styles.dateText}>{formatDisplayDate(item.timestamp)}</Text>
            </View>
         </View>
-        <TouchableOpacity onPress={() => deleteRecord(item.id)}>
+        {/* ? [Modified] Pass name and timestamp to deleteRecord for backend sync */}
+        <TouchableOpacity onPress={() => deleteRecord(item.id, item.name, item.timestamp)}>
            <MaterialIcons name="delete-outline" size={24} color="#d9534f" />
         </TouchableOpacity>
       </View>
@@ -146,8 +184,8 @@ export default function HistoryPage() {
       
       {item.video_uri && (
         <View style={styles.badgeContainer}>
-          <MaterialIcons name="videocam" size={14} color="#1976d2" />
-          <Text style={[styles.vlogBadge, {marginLeft:6}]}>Vlog Recorded</Text>
+           <MaterialIcons name="videocam" size={14} color="#1976d2" />
+           <Text style={[styles.vlogBadge, {marginLeft:6}]}>Vlog Recorded</Text>
         </View>
       )}
 
@@ -178,25 +216,27 @@ export default function HistoryPage() {
     return 'sentiment-neutral';
   };
 
-
   return (
-    <View style={styles.container}>             
-        <View style={styles.headerRow}>
-            <View style={{flexDirection: 'row', alignItems: 'center'}}>
-                <TouchableOpacity onPress={() => router.back()} style={{marginRight: 10, padding: 5}}>
-                    <Ionicons name="arrow-back" size={24} color="#333" /> 
-                </TouchableOpacity>
-                <Text style={styles.pageTitle}>Your History</Text>
-            </View>
-            
-            <View style={styles.headerButtons}>
-                <TouchableOpacity style={styles.headerBtn} onPress={loadRecords}>
+    <View style={styles.container}>
+      {/* Global status bar is set in _layout or index, this is just fallback/extra */}
+      <StatusBar barStyle="dark-content" />
+      
+      <View style={styles.headerRow}>
+          <View style={{flexDirection: 'row', alignItems: 'center'}}>
+              <TouchableOpacity onPress={() => router.back()} style={{marginRight: 10, padding: 5}}>
+                  <Ionicons name="arrow-back" size={24} color="#333" /> 
+              </TouchableOpacity>
+              <Text style={styles.pageTitle}>Your History</Text>
+          </View>
+          
+          <View style={styles.headerButtons}>
+              <TouchableOpacity style={styles.headerBtn} onPress={loadRecords}>
                 <MaterialIcons name="refresh" size={24} color="#333" />
-                </TouchableOpacity>
-            </View>
-        </View>
+              </TouchableOpacity>
+          </View>
+      </View>
 
-      {/* 內容區 */}
+      {/* Content Area */}
       {loading ? (
         <ActivityIndicator size="large" color="#4e944f" style={{marginTop: 50}} />
       ) : (
@@ -233,15 +273,15 @@ export default function HistoryPage() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f5f5f5' },
   
-  // --- Header 樣式 (白色內容，但被 SafeAreaView 覆蓋) ---
+  // --- Header Style (Keep original white style) ---
   headerRow: { 
     flexDirection: 'row', 
     justifyContent: 'space-between', 
     alignItems: 'center', 
     paddingHorizontal: 20, 
-    paddingTop: 15, // 調整 padding
+    paddingTop: 15, 
     paddingBottom: 15,
-    backgroundColor: '#fff', // 內容區塊背景白色
+    backgroundColor: '#fff', 
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
     elevation: 1,
@@ -249,12 +289,12 @@ const styles = StyleSheet.create({
   pageTitle: { 
     fontSize: 24, 
     fontWeight: 'bold', 
-    color: '#333' // 文字深色
+    color: '#333' 
   },
   headerButtons: { flexDirection: 'row' },
   headerBtn: { padding: 5 },
   
-  // ... (其餘樣式保持不變)
+  // ... (Rest of styles remain unchanged)
   listContent: { padding: 15, paddingBottom: 100 },
   card: { backgroundColor: '#fff', borderRadius: 12, padding: 15, marginBottom: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 },
   cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 },
@@ -265,7 +305,7 @@ const styles = StyleSheet.create({
   activityText: { fontSize: 15, color: '#555', marginBottom: 10, lineHeight: 22 },
   metaRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
   metaText: { fontSize: 12, color: '#999' },
-  badgeContainer: { flexDirection: 'row', marginBottom: 10 },
+  badgeContainer: { flexDirection: 'row', marginBottom: 10, alignItems: 'center' },
   vlogBadge: { backgroundColor: '#e3f2fd', color: '#1976d2', fontSize: 11, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 4, overflow:'hidden', fontWeight:'600' },
   cardActions: { borderTopWidth: 1, borderTopColor: '#f0f0f0', paddingTop: 10, alignItems: 'flex-end' },
   exportBtnSmall: { flexDirection: 'row', alignItems: 'center' },
